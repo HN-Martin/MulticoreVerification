@@ -1,0 +1,293 @@
+MODULE Processeur(ack,data)
+VAR
+  state	:	{ld, st, nop};
+  ad	:	boolean;
+  val	:	boolean;
+  lu	:	boolean;
+
+ASSIGN
+  init(state) 	:= nop;
+  init(ad) 	:= FALSE;
+  init(val)	:= FALSE;
+  init(lu)	:= FALSE;
+
+  next(state) := 
+	case
+		ack | (state = nop)	:	{ld, st, nop};
+		TRUE		 	:	state;
+	esac;
+
+  next(ad):=
+	case
+		ack | (state = nop)	:	{FALSE,TRUE};
+		TRUE			:	ad;
+	esac;
+ 
+  next(val):=
+	case
+		ack | (state = nop)	:	{FALSE,TRUE};
+		TRUE		:	val;
+	esac;
+ 
+  next(lu):=
+	case
+		ack & (state=ld)	:	data;
+		TRUE			:	lu;
+	esac;
+--END Processeur
+
+----------------------------------------------------------------------------
+
+MODULE Memoire(cmd, ad, val)
+VAR
+  data : array 0..1 of boolean;
+  dout : boolean;
+  valid : boolean;
+
+ASSIGN
+  init(data[0]) := FALSE;
+  init(data[1]) := FALSE;
+  init(dout)	:= FALSE;
+  init(valid)	:= FALSE;
+  
+  next(data[0]) :=
+    case
+        (cmd = st) & (ad = FALSE)         : val;
+        TRUE                              : data[0];
+    esac;
+    
+  next(data[1]) :=
+    case
+        (cmd = st) & (ad = TRUE)          : val;
+        TRUE                              : data[1];
+    esac;
+    
+  next(dout) :=
+    case
+    	(cmd = ld) & (ad = FALSE)	: data[0];
+    	(cmd = ld) & (ad = TRUE)	: data[1];
+    	TRUE				: dout;
+    esac;
+    
+  next(valid) :=
+    case
+    	(cmd = ld)	: TRUE;
+	    (cmd = st)	: TRUE;
+    	TRUE		: FALSE;
+    esac;
+    
+--END Memoire
+
+----------------------------------------------------------------------------------
+
+MODULE Bus(arb_gnt, b_in_mem,
+	b_in_L1_1_ad , b_in_L1_1_dt , b_in_L1_1_ctrl ,
+	b_in_L1_2_ad, b_in_L1_2_dt, b_in_L1_2_ctrl,
+	b_in_L1_3_ad, b_in_L1_3_dt, b_in_L1_3_ctrl)
+VAR
+  b_out_dt : boolean;
+  b_out_ad : boolean;
+  b_out_ctrl : {ld, st, nop};
+
+ASSIGN
+  init(b_out_dt) := FALSE;
+  init(b_out_ad) := FALSE;
+  init(b_out_ctrl) := nop;
+
+  next(b_out_dt) :=
+    case
+        (arb_gnt = mem)          : b_in_mem;
+        (arb_gnt = 1)		 : b_in_L1_1_dt;
+        (arb_gnt = 2)		 : b_in_L1_2_dt;
+        (arb_gnt = 3)		 : b_in_L1_3_dt;
+        TRUE                     : b_out_dt;
+    esac;
+
+  next(b_out_ad) :=
+    case
+        (arb_gnt = 1)		 : b_in_L1_1_ad;
+        (arb_gnt = 2)		 : b_in_L1_2_ad;
+        (arb_gnt = 3)		 : b_in_L1_3_ad;
+        TRUE             : b_out_ad;
+    esac;
+
+  next(b_out_ctrl) :=
+    case
+        (arb_gnt = 1)		 : b_in_L1_1_ctrl;
+        (arb_gnt = 2)		 : b_in_L1_2_ctrl;
+        (arb_gnt = 3)		 : b_in_L1_3_ctrl;
+    	  TRUE			       : nop;
+    esac;
+
+--END Bus
+
+----------------------------------------------------------------------------------
+
+MODULE Arbitre(valid, L1_1_req, L1_2_req, L1_3_req)
+VAR
+  arb_gnt 	: {mem, 1, 2, 3, rien};
+  last_proc	: {1, 2, 3};
+
+ASSIGN
+  init(arb_gnt) := 1;
+  init(last_proc) := 3;
+  
+  next(arb_gnt) :=
+    case
+        (arb_gnt = 1)		 : mem;
+        (arb_gnt = 2)		 : mem;
+        (arb_gnt = 3)		 : mem;
+	      (arb_gnt = mem) &  !valid : rien;
+        
+        (last_proc=1) & L1_2_req	: 2;
+	      (last_proc=1) & L1_3_req	: 3;
+	      (last_proc=1) & L1_1_req	: 1;
+
+	      (last_proc=2) & L1_3_req	: 3;
+	      (last_proc=2) & L1_1_req	: 1;
+	      (last_proc=2) & L1_2_req	: 2;
+
+	      (last_proc=3) & L1_1_req	: 1;
+	      (last_proc=3) & L1_2_req	: 2;
+	      (last_proc=3) & L1_3_req	: 3;
+
+        (arb_gnt=rien) & L1_1_req	: 1;
+	      (arb_gnt=rien) & L1_2_req	: 2;
+	      (arb_gnt=rien) & L1_3_req	: 3;
+
+        TRUE                  		: rien;
+    esac;
+  
+  next(last_proc) :=
+    case
+    	(arb_gnt = 1)	: 1;
+    	(arb_gnt = 2)	: 2;
+    	(arb_gnt = 3)	: 3;
+    	TRUE		: last_proc;
+    esac; 
+    
+--END Arbitre
+
+----------------------------------------------------------------------------------
+
+MODULE CacheL1(p_data, p_ctrl, p_ad, b_data, b_ctrl, b_ad, ar_gnt)
+VAR
+	dout : boolean;
+	adout : boolean;
+	cmd : {st, ld, nop};
+	req : boolean;
+	data : boolean;
+	ad : boolean; -- pour le snoop
+	ack : boolean;
+
+ASSIGN
+  init(data)	:= FALSE;
+  init(ad)	:= FALSE;
+  init(cmd)	:= nop;
+  init(req)	:= FALSE;
+  init(dout)	:= FALSE;
+  init(adout)	:= FALSE;
+
+    next(dout) :=
+    case
+	    (p_ctrl = st) : p_data;
+    	TRUE : dout;
+    esac;
+
+    next(adout) :=
+    case
+	    (p_ctrl != nop) : p_ad;
+    	TRUE : adout;
+    esac;
+
+    next(cmd) :=
+    case
+	    (p_ctrl = st) : st;
+	    (p_ctrl = ld) & (ad != p_ad) : ld;
+    	TRUE : nop;
+    esac;
+
+    next(req) :=
+    case
+      (p_ctrl = ld) & (ad != p_ad) & (ar_gnt = rien) & (p_ad = b_ad) : FALSE;
+      (p_ctrl = st) & (ar_gnt = rien) & (p_ad = b_ad) : FALSE;
+	    (p_ctrl = st) : TRUE;
+	    (p_ctrl = ld) & (ad != p_ad) : TRUE;
+	    TRUE : FALSE;
+    esac;
+
+    next(ack) :=
+    case
+      (p_ctrl = st) & (ar_gnt = rien) & (p_ad = b_ad) : TRUE;
+      (p_ctrl = ld) & (ad = p_ad) : TRUE;                                             -- HIT
+      (p_ctrl = ld) & (ad != p_ad) & (ar_gnt = rien) & (p_ad = b_ad) : TRUE;           -- MISS mais la donnée a été écrite sur le bus par la mémoire
+	    TRUE : FALSE;
+    esac;
+
+    next(data) :=
+    case
+      (p_ctrl = st) & (ad = p_ad) : p_data;
+      (p_ctrl = ld) & (ad != p_ad) & (ar_gnt = rien) & (p_ad = b_ad) : b_data;         -- retour du laod depuis la mémoire
+      (b_ctrl = st) & (ad = b_ad) : b_data;                                           -- SNOOP
+    	TRUE : data;
+    esac;
+
+    next(ad) :=
+    case
+    	(p_ctrl = ld) & (ad != p_ad) & (ar_gnt = rien) & (p_ad = b_ad) : p_ad;           -- Ne change qu au retour du laod depuis la mémoire
+	    TRUE : ad;
+    esac;
+--END Cache
+
+---------------------------------------------------------------------------------------
+
+
+MODULE main
+VAR
+	p1 : Processeur(c1.ack, c1.data);
+	c1 : CacheL1(p1.val, p1.state, p1.ad, b.b_out_ad, b.b_out_ctrl, b.b_out_dt, arb.arb_gnt);
+
+	p2 : Processeur(c2.ack, c2.data);
+	c2 : CacheL1(p2.val, p2.state, p2.ad, b.b_out_ad, b.b_out_ctrl, b.b_out_dt, arb.arb_gnt);
+
+	p3 : Processeur(c3.ack, c3.data);
+	c3 : CacheL1(p3.val, p3.state, p3.ad, b.b_out_ad, b.b_out_ctrl, b.b_out_dt, arb.arb_gnt);
+
+	b : Bus(arb.arb_gnt, memory.dout,
+		c1.adout, c1.dout, c1.cmd,
+		c2.adout, c2.dout, c2.cmd,
+		c3.adout, c3.dout, c3.cmd);
+	arb : Arbitre(memory.valid, c1.req, c2.req, c3.req);
+	memory : Memoire(b.b_out_ctrl, b.b_out_ad, b.b_out_dt);
+
+--END main
+------------------------------------------------------------------------------------------
+
+
+--SPEC
+  
+LTLSPEC G(!(p1.state = nop) && !(c1.ack) -> X(p1.state) = p1.state)
+
+LTLSPEC G(c1.req -> F (arb.arb_gnt = 1))
+
+LTLSPEC GF (c1.req)				
+
+LTLSPEC GF (c2.req)  	
+
+LTLSPEC GF (c3.req)
+
+LTLSPEC GF (arb.arb_gnt = 1)
+
+LTLSPEC GF (arb.arb_gnt = 2)
+
+LTLSPEC	GF (arb.arb_gnt = 3)
+
+LTLSPEC GF (arb.arb_gnt = mem)
+
+LTLSPEC G ( (b.b_out.ctrl = ld) -> F(m.valid & (b.b_out_dt = m.data[0] | b.b_out_dt = m.data[1])))
+
+LTLSPEC G ( !(c1.data = X (c1.data) -> F ( !(m.data[0] = X(m.data[0]) | !(m.data[1] = X (m.data[1] ))))
+
+LTLSPEC G ((c1.ad = c2.ad) -> F(c1.data = c2.data))
+
+
